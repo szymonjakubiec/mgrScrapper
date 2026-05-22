@@ -1,46 +1,59 @@
 import psycopg2
+from mgrScrapper.embedding import get_embedding
 
-from embedding import get_embedding
 
-def get_similar_projects(query_text, limit=5):
-    print("Looking for similar projects...")
+def get_similar_projects(query_text, model_name="all-MiniLM-L6-v2", limit=5):
+    print(f"Szukanie projektów podobnych do: '{query_text}'...")
 
     query_vector = get_embedding(query_text)
+
     query_vector_str = str(query_vector)
 
-    conn = psycopg2.connect("host=localhost dbname=vector-db user=postgres password=ZAQ!2wsx")
-    cursor = conn.cursor()
+    db_params = "host=localhost dbname=vector-db user=postgres password=ZAQ!2wsx port=5433"
 
-    sql = """
-        SELECT
-            repo_name,
-            description,
-            1 - (embedding <=> %s::vector) AS cos_similarity
-        FROM miniLM_embeddings
-        ORDER BY cos_similarity DESC
-        LIMIT %s;
-    """
+    try:
+        # 2. Otwarcie połączenia z użyciem bloku 'with' (bezpieczne zamykanie)
+        with psycopg2.connect(db_params) as conn:
+            with conn.cursor() as cursor:
+                sql = """
+                      SELECT r.name, \
+                             r.short_desc, \
+                             r.dependencies, \
+                             1 - (e.embedding <=> %s::vector) AS cos_similarity
+                      FROM embeddings e
+                               JOIN repo r ON e.repo_id = r.id
+                      WHERE e.model_name = %s
+                      ORDER BY cos_similarity DESC
+                      LIMIT %s; \
+                      """
 
-    cursor.execute(sql, (query_vector_str, limit))
-    results = cursor.fetchall()
+                cursor.execute(sql, (query_vector_str, model_name, limit))
+                results = cursor.fetchall()
 
-    cursor.close()
-    conn.close()
+                return results
 
-    return results
+    except psycopg2.Error as e:
+        print(f"Wystąpił błąd podczas operacji na bazie danych: {e}")
+        return []
+
 
 if __name__ == '__main__':
     query_text = "A lightweight framework for building fast web APIs in Python using async and await."
 
     similar_projects = get_similar_projects(query_text)
 
-    print("FOUND THESE PROJECTS:")
-    print("-" * 50)
+    print("\nZNALEZIONO NASTĘPUJĄCE PROJEKTY:")
+    print("-" * 70)
+
     for row in similar_projects:
         repo_name = row[0]
         description = row[1]
-        similarity = row[2]
+        dependencies = row[2]
+        similarity = row[3]
 
         print(f"[{similarity * 100:.2f}%] Repo: {repo_name}")
-        print(f"Desc: {description}")
-        print("-" * 50)
+        print(f"Opis: {description}")
+
+        deps_formatted = ", ".join(dependencies) if dependencies else "Brak zidentyfikowanych zależności"
+        print(f"Sugerowane zależności: {deps_formatted}")
+        print("-" * 70)
