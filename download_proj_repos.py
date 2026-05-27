@@ -6,9 +6,9 @@ import json
 import os
 from dotenv import load_dotenv
 
-from mgrScrapper.data_cleaning import extract_project_description
+from data_cleaning import extract_project_description
 
-load_dotenv() 
+load_dotenv()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 HEADERS = {
@@ -49,10 +49,12 @@ EXCLUDED_TITLEWORDS = [
 
 
 async def fetch_raw_file(client, full_name, default_branch, file_path):
-    """Pobiera plik omijając limity API, używając raw.githubusercontent.com"""
+    """
+    Pobiera plik omijając limity API, używając raw.githubusercontent.com
+    """
     url = f"https://raw.githubusercontent.com/{full_name}/{default_branch}/{file_path}"
     try:
-        response = await client.get(url, timeout=10.0)
+        response = await client.get(url, headers=HEADERS, timeout=10.0)
         if response.status_code == 200:
             return response.text
         return None
@@ -62,7 +64,6 @@ async def fetch_raw_file(client, full_name, default_branch, file_path):
 async def fetch_repo_tree_paths(client, full_name, default_branch, dep_filename):
     """
     Pobiera pełne drzewo plików repozytorium przez GitHub API.
-    Wymaga podania brancha (np. 'main' lub 'master').
     """
 
     url = f"https://api.github.com/repos/{full_name}/git/trees/{default_branch}?recursive=1" # ?recursive=1 pobiera całe drzewo za jednym zapytaniem
@@ -79,6 +80,10 @@ async def fetch_repo_tree_paths(client, full_name, default_branch, dep_filename)
                 if item.get("type") == "blob":
                     path = item["path"]
 
+                    if path == ".npmignore":
+                        print(f"- {full_name}: Discarded, has .npmignore")
+                        return [], "discarded-npmignore"
+
                     if not path.endswith(dep_filename):
                         continue
 
@@ -93,24 +98,26 @@ async def fetch_repo_tree_paths(client, full_name, default_branch, dep_filename)
 
                     paths.append(path)
 
-            return paths
+            return paths, "OK"
 
         elif response.status_code in (403, 429):
             print(f"Reached GitHub API limit while downloading tree: {full_name}!")
-            return []
+            return [], "Limit"
 
         else:
             print(f"Error {response.status_code} while downloading tree: {full_name}")
-            return []
+            return [], "Error"
 
     except Exception as e:
         print(f"Exception while downloading tree {full_name}: {e}")
-        return []
+        return [], "Exception"
 
 
 
 async def search_repositories_by_date(client, language, start_date, end_date):
-    """Wyszukuje repozytoria w określonym oknie czasowym, aby obejść limit 1000 wyników"""
+    """
+    Wyszukuje repozytoria w określonym oknie czasowym, aby obejść limit 1000 wyników
+    """
 
     exclusions = " ".join([f"-topic:{topic}" for topic in EXCLUDED_TOPICS])
     query = f"language:{language} stars:>10 {exclusions} created:{start_date}..{end_date}"
@@ -174,34 +181,40 @@ async def process_repository(client, repo):
         bad_dep_content.append(full_name)
         return
 
-    dep_filename = "package.json" if lang == "JavaScript" else "pom.xml" if lang == "Java" else "requirements.txt"
+    if lang == "JavaScript":
+        dep_filename = "package.json"
+    else:
+        print(f"- Language {lang} is not yet supported")
+        return
 
-    readme_task = fetch_raw_file(client, full_name, branch, "README.md")
-    npmignore_task = fetch_raw_file(client, full_name, branch, ".npmignore")
-    tree_task = fetch_repo_tree_paths(client, full_name, branch, dep_filename)
+    valid_dep_paths, status = await fetch_repo_tree_paths(client, full_name, branch, dep_filename)
 
-    readme_content, npm_file, valid_dep_paths = await asyncio.gather(readme_task, npmignore_task, tree_task)
+    if status == "discarded-npmignore":
+        bad_dep_content.append(full_name)
+        return
 
-    if not valid_dep_paths:
+    if status in ["Limit", "Error", "Exception"] or not valid_dep_paths:
         no_dep_content.append(full_name)
         return
 
-    # 4. Równoległe pobranie wszystkich znalezionych plików konfiguracyjnych
-    dep_tasks = [fetch_raw_file(client, full_name, branch, path) for path in valid_dep_paths]
-    dep_contents = await asyncio.gather(*dep_tasks)
+    # pobieramy README oraz wszystkie package.json RÓWNOLEGLE
+    tasks = [fetch_raw_file(client, full_name, branch, "README.md")]
+    for path in valid_dep_paths:
+        tasks.append(fetch_raw_file(client, full_name, branch, path))
 
-    # 5. Agregacja i weryfikacja (logika dla JS)
+    results = await asyncio.gather(*tasks)
+
+    readme_content = results[0]
+    dep_contents = results[1:]
+
+    # Agregacja i weryfikacja (logika dla JS)
     aggregated_deps = set()
 
     if lang == "JavaScript":
-        if npm_file:
-            print(f"- {full_name}: Discarded, has .npmignore")
-            bad_dep_content.append(full_name)
-            return
 
         for content, path in zip(dep_contents, valid_dep_paths):
-            # if not content:
-            #     continue
+            if not content:
+                continue
 
             try:
                 pkg = json.loads(content)
@@ -253,9 +266,6 @@ async def main():
         print(f"Looking for JavaScript repos from {start_date} to {end_date}...")
         repos = await search_repositories_by_date(client, "JavaScript", start_date, end_date)
 
-        # print(f"Found {len(repos)} repos. Starting to download files...")
-
-
         # Tworzymy zadania do współbieżnego pobierania plików
         tasks = [process_repository(client, repo) for repo in repos]
 
@@ -263,7 +273,7 @@ async def main():
         chunk_size = 10
         for i in range(0, len(tasks), chunk_size):
             await asyncio.gather(*tasks[i:i + chunk_size])
-            await asyncio.sleep(2)  # Krótki oddech dla serwerów GitHuba
+            await asyncio.sleep(2)
 
         good_dep_content_sort = sorted(good_dep_content)
         bad_dep_content_sort = sorted(bad_dep_content)
