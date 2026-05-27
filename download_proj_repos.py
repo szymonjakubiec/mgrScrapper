@@ -8,11 +8,9 @@ from dotenv import load_dotenv
 
 from mgrScrapper.data_cleaning import extract_project_description
 
-load_dotenv()
-gh_token = os.getenv("GITHUB_TOKEN")
+load_dotenv() 
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
-# Twój token do GitHub API (wymagany do wyszukiwania)
-GITHUB_TOKEN = gh_token
 HEADERS = {
     "Authorization": f"token {GITHUB_TOKEN}",
     "Accept": "application/vnd.github.v3+json"
@@ -21,6 +19,11 @@ HEADERS = {
 EXCLUDED_TOPICS = [
     'api', 'awesome', 'book', 'challenge', 'course', 'education', 'educationbook', 'example',
     'framework', 'learn', 'learning', 'library', 'sdk', 'tutorial'
+]
+
+EXCLUDED_TITLEWORDS = [
+    'algorithm', 'awesome', 'bits', 'cheatsheet', 'collection', 'concept', 'course', 'framework', 'guide',
+            'icons', 'interview', 'roadmap', 'starter', 'tutorial', 'you-dont-need'
 ]
 
 # async def init_db():
@@ -61,8 +64,8 @@ async def fetch_repo_tree_paths(client, full_name, default_branch, dep_filename)
     Pobiera pełne drzewo plików repozytorium przez GitHub API.
     Wymaga podania brancha (np. 'main' lub 'master').
     """
-    # Parametr ?recursive=1 pobiera całe drzewo za jednym zapytaniem
-    url = f"https://api.github.com/repos/{full_name}/git/trees/{default_branch}?recursive=1"
+
+    url = f"https://api.github.com/repos/{full_name}/git/trees/{default_branch}?recursive=1" # ?recursive=1 pobiera całe drzewo za jednym zapytaniem
 
     try:
         response = await client.get(url, headers=HEADERS, timeout=10.0)
@@ -85,7 +88,6 @@ async def fetch_repo_tree_paths(client, full_name, default_branch, dep_filename)
                     if depth > 2:
                         continue
 
-                    # Pomijamy ścieżki, w których jakikolwiek folder lub plik zaczyna się od kropki
                     if any(part.startswith('.') for part in parts):
                         continue
 
@@ -94,15 +96,15 @@ async def fetch_repo_tree_paths(client, full_name, default_branch, dep_filename)
             return paths
 
         elif response.status_code in (403, 429):
-            print(f"Limit API GitHuba osiągnięty przy pobieraniu drzewa dla {full_name}!")
+            print(f"Reached GitHub API limit while downloading tree: {full_name}!")
             return []
 
         else:
-            print(f"Błąd {response.status_code} podczas pobierania drzewa dla {full_name}")
+            print(f"Error {response.status_code} while downloading tree: {full_name}")
             return []
 
     except Exception as e:
-        print(f"Wyjątek przy pobieraniu drzewa dla {full_name}: {e}")
+        print(f"Exception while downloading tree {full_name}: {e}")
         return []
 
 
@@ -150,15 +152,14 @@ async def search_repositories_by_date(client, language, start_date, end_date):
                 await asyncio.sleep(2.5)
 
             elif response.status_code == 403:
-                print("Limit API osiągnięty! Czekam 60 sekund...")
+                print("Reached API limit! Waiting 60 seconds...")
                 await asyncio.sleep(60)
             else:
-                # Warto logować też inne błędy (np. wciąż pojawiający się 422), by wiedzieć co nie gra
-                print(f"Błąd API {response.status_code}: {response.text}")
+                print(f"API error {response.status_code}: {response.text}")
                 break
 
         except Exception as e:
-            print(f"Błąd wyszukiwania: {e}")
+            print(f"Searching error: {e}")
 
     return repos
 
@@ -168,9 +169,7 @@ async def process_repository(client, repo):
     branch = repo["default_branch"]
     lang = repo["language"]
 
-    if any(word in full_name.lower() for word in
-           ['algorithm', 'awesome', 'bits', 'cheatsheet', 'collection', 'concept', 'course', 'framework', 'guide',
-            'icons', 'interview', 'roadmap', 'starter', 'tutorial', 'you-dont-need']):
+    if any(word in full_name.lower() for word in EXCLUDED_TITLEWORDS):
         print(f"- {full_name}: Discarded, keyword match in name (tutorial/book)")
         bad_dep_content.append(full_name)
         return
@@ -182,7 +181,6 @@ async def process_repository(client, repo):
     tree_task = fetch_repo_tree_paths(client, full_name, branch, dep_filename)
 
     readme_content, npm_file, valid_dep_paths = await asyncio.gather(readme_task, npmignore_task, tree_task)
-    bad_folders = {'node_modules', 'dist', 'build', 'vendor', 'examples', 'test', 'tests', 'docs'}
 
     if not valid_dep_paths:
         no_dep_content.append(full_name)
@@ -240,23 +238,22 @@ async def process_repository(client, repo):
             #                       ''', full_name, repo["html_url"], lang, readme_content, dep_content)
             print(f"{full_name}: Verified and saved (Found {len(valid_dep_paths)} files, {len(aggregated_deps)} unique deps)")
         except Exception as e:
-            print(f"Błąd bazy dla {full_name}: {e}")
+            print(f"DB error for {full_name}: {e}")
 
 
 async def main():
 
     # db_conn = await init_db()
 
-    # connection limits
     limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
     async with httpx.AsyncClient(limits=limits) as client:
         start_date = "2018-01-01"
         end_date = "2026-01-01"
 
-        print(f"Szukam repozytoriów JavaScript z okresu {start_date} do {end_date}...")
+        print(f"Looking for JavaScript repos from {start_date} to {end_date}...")
         repos = await search_repositories_by_date(client, "JavaScript", start_date, end_date)
 
-        # print(f"Znaleziono {len(repos)} repozytoriów. Rozpoczynam pobieranie plików...")
+        # print(f"Found {len(repos)} repos. Starting to download files...")
 
 
         # Tworzymy zadania do współbieżnego pobierania plików
