@@ -3,5 +3,6 @@ from typing import List, Optional
 
 class Repo(BaseModel):
     name: str
-    short_desc: Optional[str] = ""
+    desc: Optional[str] = ""
     dependencies: List[str]
+    raw_desc: str = ""
