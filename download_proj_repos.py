@@ -8,7 +8,6 @@ import os
 from dotenv import load_dotenv
 import re
 
-from data_cleaning import extract_project_description
 
 load_dotenv()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -39,8 +38,8 @@ EXCLUDED_TITLEWORDS = [
 async def init_db():
     """Tworzy pulę max 20 połączeń do BD w Dockerze."""
 
-    db_params = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@localhost:{DB_PORT}/{POSTGRES_DB}"
-    pool = await asyncpg.create_pool(db_params, min_size=1, max_size=20)
+    db_url = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@localhost:{DB_PORT}/{POSTGRES_DB}"
+    pool = await asyncpg.create_pool(db_url, min_size=1, max_size=20)
     # Tworzymy tabelę, jeśli nie istnieje
     # await conn.execute('''
     #                    CREATE TABLE IF NOT EXISTS repositories
