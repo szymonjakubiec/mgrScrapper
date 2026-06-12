@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 from dotenv import load_dotenv
+import re
 
 from data_cleaning import extract_project_description
 
@@ -109,7 +110,7 @@ async def fetch_repo_tree_paths(client, full_name, default_branch, dep_filename)
                     if item.get("type") == "blob":
                         path = item["path"]
 
-                        if path.lower() == "readme.md":
+                        if re.match(r"readme(\.[a-z]+)?", path.lower()):
                             readme_file = path
 
                         if path.lower() == ".npmignore":
@@ -245,6 +246,10 @@ async def process_repository(client, repo, db_pool):
         no_dep_content.append(full_name)
         return
 
+    if not readme_file:
+        no_dep_content.append(full_name)
+        return
+
     # pobieramy README oraz wszystkie package.json RÓWNOLEGLE
     tasks = [fetch_raw_file(client, full_name, branch, readme_file)]
     for path in valid_dep_paths:
@@ -320,8 +325,8 @@ async def main():
 
     limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
     async with httpx.AsyncClient(limits=limits) as client:
-        current_start_date = datetime.datetime.strptime("2022-12-04", "%Y-%m-%d")
-        final_end_date = datetime.datetime.strptime("2023-01-03", "%Y-%m-%d")
+        current_start_date = datetime.datetime.strptime("2018-01-01", "%Y-%m-%d")
+        final_end_date = datetime.datetime.strptime("2026-01-01", "%Y-%m-%d")
         step = datetime.timedelta(days=30)
 
         while current_start_date < final_end_date:
