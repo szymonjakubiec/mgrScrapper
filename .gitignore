@@ -180,4 +180,6 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-results0
+models
+chinese_translations_attempt
+results
