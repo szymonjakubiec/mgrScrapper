@@ -7,14 +7,15 @@ import json
 import os
 from dotenv import load_dotenv
 import re
+import argparse
 
 
 load_dotenv()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 curr_dir = os.path.dirname(__file__)
-dc_env_path = os.path.join(curr_dir, "docker-compose", ".env")
-load_dotenv(dotenv_path=dc_env_path)
+postgres_env_path = os.path.join(curr_dir, "docker-compose\\postgres_db", ".env")
+load_dotenv(dotenv_path=postgres_env_path)
 POSTGRES_USER = os.getenv("POSTGRES_USER")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 POSTGRES_DB = os.getenv("POSTGRES_DB")
@@ -35,30 +36,45 @@ EXCLUDED_TITLEWORDS = [
             'icons', 'interview', 'roadmap', 'starter', 'tutorial', 'you-dont-need'
 ]
 
+
+parser = argparse.ArgumentParser(description="Loading repos from GitHub")
+parser.add_argument("--db_table_name", type=str, default="default_table", help="Nazwa tabeli w bazie")
+parser.add_argument("--start_date", type=str, required=True, help="Start date (YYYY-MM-DD)")
+parser.add_argument("--end_date", type=str, required=True, help="End date (YYYY-MM-DD)")
+parser.add_argument("--min_stars", type=int, default=10, help="Minimal number of stars")
+
+args = parser.parse_args()
+
+DB_TABLE_NAME = args.db_table_name
+START_DATE = args.start_date
+END_DATE = args.end_date
+MIN_STARS = args.min_stars
+
+
 async def init_db():
-    """Tworzy pulę max 20 połączeń do BD w Dockerze."""
+    """Creates a pool of max 20 connections to DB in Docker."""
 
     db_url = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@localhost:{DB_PORT}/{POSTGRES_DB}"
     pool = await asyncpg.create_pool(db_url, min_size=1, max_size=20)
-    # Tworzymy tabelę, jeśli nie istnieje
-    # await conn.execute('''
-    #                    CREATE TABLE IF NOT EXISTS repositories
-    #                    (
-    #                        id              SERIAL PRIMARY KEY,
-    #                        full_name       VARCHAR(255) UNIQUE,
-    #                        url             VARCHAR(255),
-    #                        language        VARCHAR(50),
-    #                        readme_text     TEXT,
-    #                        dependency_file TEXT,
-    #                        is_processed    BOOLEAN DEFAULT FALSE
-    #                    )
-    #                    ''')
+
+    async with pool.acquire() as conn:
+        await conn.execute(f'''
+                           CREATE TABLE IF NOT EXISTS {DB_TABLE_NAME}
+                           (
+                               id              SERIAL  NOT NULL PRIMARY KEY,
+                               name            TEXT UNIQUE NOT NULL,
+                               "desc"          TEXT,
+                               deps            TEXT[],
+                               raw_desc        TEXT,
+                               deps_devdeps    TEXT[]
+                           )
+                           ''')
     return pool
 
 
 async def fetch_raw_file(client, full_name, default_branch, file_path):
     """
-    Pobiera plik omijając limity API, używając raw.githubusercontent.com
+    Downloads file while avoiding API limitations, using raw.githubusercontent.com
     """
     url = f"https://raw.githubusercontent.com/{full_name}/{default_branch}/{file_path}"
     for attempt in range(3):
@@ -68,7 +84,7 @@ async def fetch_raw_file(client, full_name, default_branch, file_path):
                 return response.text
 
             elif response.status_code in (403,429):
-                # Losowy jitter (0.1, 1.5) sekundy
+                # Random jitter 0.1 - 1.5 seconds
                 retry_after = int(response.headers.get("retry-after", 0))
                 if retry_after > 0:
                     sleep_time = retry_after + random.uniform(0.1, 1.5)
@@ -90,12 +106,12 @@ async def fetch_raw_file(client, full_name, default_branch, file_path):
 
 async def fetch_repo_tree_paths(client, full_name, default_branch, dep_filename):
     """
-    Pobiera pełne drzewo plików repozytorium przez GitHub API.
-    Odrzuca repo, jeśli posiada .npmognore w root folder.
-    Zwraca też, jak nazwany jest readme.
+    Fetches the full repository file tree via the GitHub API.
+    Rejects the repo if it contains an .npmignore in the root directory.
+    Also returns the name of the readme file.
     """
 
-    url = f"https://api.github.com/repos/{full_name}/git/trees/{default_branch}?recursive=1" # ?recursive=1 pobiera całe drzewo za jednym zapytaniem
+    url = f"https://api.github.com/repos/{full_name}/git/trees/{default_branch}?recursive=1" # ?recursive=1 fetches whole tree with 1 query
     readme_file = ""
     for attempt in range(3):
         try:
@@ -105,11 +121,11 @@ async def fetch_repo_tree_paths(client, full_name, default_branch, dep_filename)
                 data = response.json()
                 paths = []
                 for item in data.get("tree", []):
-                    # Interesują nas tylko pliki ("blob")
+                    # only looking for blob files
                     if item.get("type") == "blob":
                         path = item["path"]
 
-                        if re.match(r"readme(\.[a-z]+)?", path.lower()):
+                        if re.match(r"readme(\.[a-z]+)?", path.lower()): # readme file with any extension
                             readme_file = path
 
                         if path.lower() == ".npmignore":
@@ -156,11 +172,11 @@ async def fetch_repo_tree_paths(client, full_name, default_branch, dep_filename)
 
 async def search_repositories_by_date(client, language, start_date, end_date):
     """
-    Wyszukuje repozytoria w określonym oknie czasowym, aby obejść limit 1000 wyników
+    Searches repositories in specified time frame, to avoid 1000 results limit.
     """
 
     exclusions = " ".join([f"-topic:{topic}" for topic in EXCLUDED_TOPICS])
-    query = f"language:{language} stars:>100 {exclusions} created:{start_date}..{end_date}"
+    query = f"language:{language} stars:>{MIN_STARS} {exclusions} created:{start_date}..{end_date}"
 
     url = "https://api.github.com/search/repositories"
 
@@ -213,13 +229,13 @@ async def search_repositories_by_date(client, language, start_date, end_date):
 
         except Exception as e:
             print(f"[GITHUB API] Searching error: {e}")
-            # Czekamy chwilę w przypadku błędu sieciowego (np. timeout) przed kolejną próbą
+            # Waiting a bit in case of network error before the next attempt
             await asyncio.sleep(10)
 
     return repos
 
 async def process_repository(client, repo, db_pool):
-    """Pobiera README i plik zależności, a następnie zapisuje do bazy"""
+    """Fetches README and dependency files, then saves them to DB."""
     full_name = repo["full_name"]
     branch = repo["default_branch"]
     lang = repo["language"]
@@ -249,7 +265,7 @@ async def process_repository(client, repo, db_pool):
         no_dep_content.append(full_name)
         return
 
-    # pobieramy README oraz wszystkie package.json RÓWNOLEGLE
+    # fetch README and all package.json files in parallel
     tasks = [fetch_raw_file(client, full_name, branch, readme_file)]
     for path in valid_dep_paths:
         tasks.append(fetch_raw_file(client, full_name, branch, path))
@@ -259,7 +275,7 @@ async def process_repository(client, repo, db_pool):
     readme_content = results[0]
     dep_contents = results[1:]
 
-    # Agregacja i weryfikacja (logika dla JS)
+
     aggregated_deps = set()
     aggregated_deps_devdeps = set()
 
@@ -307,8 +323,8 @@ async def process_repository(client, repo, db_pool):
 
             good_dep_content.append(full_name)
             async with db_pool.acquire() as conn:
-                await conn.execute('''
-                                       INSERT INTO repo (name, deps, raw_desc, deps_devdeps)
+                await conn.execute(f'''
+                                       INSERT INTO {DB_TABLE_NAME} (name, deps, raw_desc, deps_devdeps)
                                        VALUES ($1, $2, $3, $4)
                                        ON CONFLICT (name) DO NOTHING
                                        ''', full_name, deps_list, safe_readme, deps_devdeps_list)
@@ -324,8 +340,8 @@ async def main():
 
     limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
     async with httpx.AsyncClient(limits=limits) as client:
-        current_start_date = datetime.datetime.strptime("2018-01-01", "%Y-%m-%d")
-        final_end_date = datetime.datetime.strptime("2026-01-01", "%Y-%m-%d")
+        current_start_date = datetime.datetime.strptime(START_DATE, "%Y-%m-%d")
+        final_end_date = datetime.datetime.strptime(END_DATE, "%Y-%m-%d")
         step = datetime.timedelta(days=30)
 
         while current_start_date < final_end_date:
@@ -333,7 +349,6 @@ async def main():
             if current_end_date > final_end_date:
                 current_end_date = final_end_date
 
-            # Formatowanie dat dla zapytania (np. "2018-01-01")
             start_str = current_start_date.strftime("%Y-%m-%d")
             end_str = current_end_date.strftime("%Y-%m-%d")
 
@@ -345,11 +360,10 @@ async def main():
             print(f"Looking for JavaScript repos from {current_start_date} to {current_end_date}...")
             repos = await search_repositories_by_date(client, "JavaScript", start_str, end_str)
 
-            # Tworzymy zadania do współbieżnego pobierania plików
             if repos:
+                print("Processing repositories...")
                 tasks = [process_repository(client, repo, db_pool) for repo in repos]
 
-                # Uruchamiamy zadania paczkami (np. po 10 naraz), aby nie obciążyć GitHuba
                 chunk_size = 10
                 for i in range(0, len(tasks), chunk_size):
                     await asyncio.gather(*tasks[i:i + chunk_size])
@@ -371,7 +385,7 @@ async def main():
             await asyncio.sleep(3)
 
         await db_pool.close()
-        print("\n SUCCESSFULLY FINISHED DOWNLOADING THE WHOLE PERIOD 2018-2026!")
+        print(f"\n SUCCESSFULLY FINISHED DOWNLOADING THE WHOLE PERIOD {START_DATE}-{END_DATE}!")
 
             # good_dep_content_sort = sorted(good_dep_content, key=str.lower)
             # bad_dep_content_sort = sorted(bad_dep_content, key=str.lower)
