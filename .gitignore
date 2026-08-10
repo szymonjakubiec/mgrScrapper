@@ -183,3 +183,5 @@ cython_debug/
 models
 chinese_translations_attempt
 results
+
+test_prompts.py
